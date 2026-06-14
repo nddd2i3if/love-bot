@@ -13,6 +13,7 @@ from aiogram.types import (
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from openai import AsyncOpenAI
 
@@ -46,7 +47,7 @@ MAX_MESSAGE_LEN = 4000
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
 
 # ========== ПОСТОЯННАЯ КЛАВИАТУРА ==========
@@ -79,9 +80,9 @@ def init_db():
     cur.execute("SELECT COUNT(*) FROM tasks_template")
     if cur.fetchone()[0] == 0:
         sample_tasks = [
-            "СКИНУТЬ ЖЫВОТИК",
-            "НОПИСАТЬ МНЕ",
-            "ПАКУШАТЬ!"
+            "ПАКУШАТЬ",
+            "СКИНУТЬ МНЕ ЖЫВОТИК",
+            "Нописать мне"
         ]
         for task in sample_tasks:
             cur.execute("INSERT INTO tasks_template (text) VALUES (?)", (task,))
@@ -237,18 +238,33 @@ async def start_chat(message: Message, state: FSMContext):
     await state.set_state(ChatWithAI.chatting)
     await state.update_data(history=[])
     await message.answer(
-        "💬 Режим диалога включён.\nКоманды: /clear_context, /stop, /menu",
+        "💬 Режим диалога включён. Я запоминаю всё.\n"
+        "Команды: /clear_context, /stop, /menu",
         reply_markup=get_main_keyboard()
     )
 
 @dp.message(ChatWithAI.chatting)
 async def chat_with_ai(message: Message, state: FSMContext):
     user_input = message.text.strip()
-    if not user_input or user_input.startswith("/"):
+    if not user_input:
         return
+
+    # Перехват команд внутри диалога
+    if user_input == "/stop":
+        await stop_chat_command(message, state)
+        return
+    if user_input == "/clear_context":
+        await clear_context_command(message, state)
+        return
+    if user_input == "/menu":
+        await cmd_menu(message)
+        return
+
     data = await state.get_data()
     history = data.get("history", [])
     user_model = data.get("model", DEFAULT_MODEL)
+
+    # Добавляем сообщение пользователя
     history.append({"role": "user", "content": user_input})
     await bot.send_chat_action(message.chat.id, action="typing")
     answer = await get_ai_response(history, model=user_model)
@@ -259,18 +275,18 @@ async def chat_with_ai(message: Message, state: FSMContext):
 @dp.message(Command("clear_context"))
 async def clear_context_command(message: Message, state: FSMContext):
     if await state.get_state() != ChatWithAI.chatting:
-        await message.answer("Ты не в диалоге. /chat")
+        await message.answer("Ты не в режиме диалога. /chat для начала.")
         return
     await state.update_data(history=[])
-    await message.answer("🧹 История очищена.")
+    await message.answer("🧹 История диалога очищена. Продолжаем общение!")
 
 @dp.message(Command("stop"))
 async def stop_chat_command(message: Message, state: FSMContext):
     if await state.get_state() == ChatWithAI.chatting:
         await state.clear()
-        await message.answer("🔚 Диалог завершён.")
+        await message.answer("🔚 Диалог завершён. Начать заново: /chat")
     else:
-        await message.answer("Ты и так не в диалоге.")
+        await message.answer("Ты и так не в диалоге. /chat для старта.")
 
 # ========== ОСНОВНЫЕ КОМАНДЫ ==========
 @dp.message(Command("start"))
@@ -278,7 +294,7 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     get_or_create_user(user_id)
     await message.answer(
-        "Привет, любимая! 💕\nЯ бот, который помогает нам быть ближе.\n\n"
+        "Привет, любимая! 💕\nЭто бот, специально для тебя, он поможет нам быть еще чуть ближе.\n\n"
         "Кнопка «🔮 Меню» внизу или команды:\n"
         "/tasks, /stats, /ask, /chat, /model, /clear_context, /stop",
         reply_markup=get_main_keyboard()
@@ -350,7 +366,10 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext):
 
     if action == "tasks":
         tasks = get_today_tasks(user_id)
-        await callback.message.answer("✨ Задания:", reply_markup=get_tasks_keyboard(tasks) if tasks else "Нет заданий")
+        if tasks:
+            await callback.message.answer("✨ Задания:", reply_markup=get_tasks_keyboard(tasks))
+        else:
+            await callback.message.answer("Заданий нет")
     elif action == "stats":
         c, t, s = get_user_stats(user_id)
         await callback.message.answer(f"📊 Статистика:\n✅ Сегодня: {c}\n🏆 Всего: {t}\n🔥 Серия: {s}")
@@ -385,9 +404,10 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext):
 async def set_model_callback(callback: CallbackQuery, state: FSMContext):
     model_id = callback.data.split("_", 1)[1]
     if model_id in AVAILABLE_MODELS:
-        if await state.get_state() == ChatWithAI.chatting:
+        current_state = await state.get_state()
+        if current_state == ChatWithAI.chatting:
             await state.update_data(model=model_id)
-            await callback.message.answer(f"✅ Модель: {AVAILABLE_MODELS[model_id]}")
+            await callback.message.answer(f"✅ Модель изменена: {AVAILABLE_MODELS[model_id]}")
         else:
             await callback.message.answer(f"✅ Модель выбрана: {AVAILABLE_MODELS[model_id]}\nНачни /chat")
         await callback.answer()

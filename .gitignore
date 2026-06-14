@@ -1,0 +1,7 @@
+token.env
+.env
+__pycache__/
+*.pyc
+daily_tasks.db
+bot.log
+venv/
